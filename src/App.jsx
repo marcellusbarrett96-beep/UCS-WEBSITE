@@ -73,67 +73,44 @@ function timeAgo(ts) {
   return `${hrs}h ago`;
 }
 
-// ---------- Calls to YOUR backend (which calls Claude) ----------
+// ---------- Data source: shared server cache (Vercel KV) ----------
+// The scheduled job (api/refresh-news.js) keeps the default coins current
+// automatically, on a schedule, regardless of whether anyone has this page
+// open. The browser's job is just to read that cache — cheap and fast.
+// If a coin isn't cached yet (e.g. a custom one a visitor just added),
+// refreshOne() fetches it live and caches it for next time.
 
-async function callClaude(prompt) {
-  const response = await fetch("/api/claude", {
+async function getCached(ticker) {
+  const res = await fetch(`/api/get-news?ticker=${encodeURIComponent(ticker)}`);
+  if (!res.ok) return null;
+  return await res.json();
+}
+
+async function refreshOne(coin, type) {
+  const res = await fetch("/api/refresh-one", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ prompt }),
+    body: JSON.stringify({ name: coin.name, ticker: coin.ticker, type }),
   });
-  if (!response.ok) {
-    const errBody = await response.json().catch(() => ({}));
-    throw new Error(errBody.error || `API error ${response.status}`);
+  if (!res.ok) {
+    const errBody = await res.json().catch(() => ({}));
+    throw new Error(errBody.error || `API error ${res.status}`);
   }
-  const data = await response.json();
-  const text = (data.content || []).filter((b) => b.type === "text").map((b) => b.text).join("\n");
-  const clean = text.replace(/```json|```/g, "").trim();
-  const start = clean.indexOf("{");
-  const end = clean.lastIndexOf("}");
-  if (start === -1 || end === -1) throw new Error("No JSON in response");
-  return JSON.parse(clean.slice(start, end + 1));
+  return await res.json();
 }
 
 async function fetchCoinNews(coin) {
-  const prompt = `Search the web for the latest news on the cryptocurrency "${coin.name}" (ticker: ${coin.ticker}) from the last few days — focus on developments, acquisitions, settlements/legal outcomes, partnerships, and overall market sentiment.
-
-Respond with ONLY a raw JSON object, no markdown fences, no preamble, in exactly this shape:
-{
-  "sentiment": "bullish" | "bearish" | "neutral",
-  "summary": "one or two sentence sentiment summary in your own words, under 40 words",
-  "headlines": [
-    { "title": "short original-wording headline, under 12 words", "source": "publication or site name", "tone": "bullish" | "bearish" | "neutral" }
-  ]
-}
-Include at most 4 headlines, mixing bullish and bearish items if they exist — reflect what's actually being reported, don't force a slant. Never quote source text verbatim; paraphrase everything in your own words.`;
-  const parsed = await callClaude(prompt);
-  return {
-    sentiment: parsed.sentiment || "neutral",
-    summary: parsed.summary || "",
-    headlines: Array.isArray(parsed.headlines) ? parsed.headlines.slice(0, 4) : [],
-    fetchedAt: Date.now(),
-    status: "ready",
-  };
+  const cached = await getCached(coin.ticker);
+  if (cached?.news && Date.now() - cached.news.fetchedAt < REFRESH_MS) {
+    return cached.news;
+  }
+  return await refreshOne(coin, "news");
 }
 
 async function fetchCoinProfile(coin) {
-  const prompt = `Explain the cryptocurrency "${coin.name}" (ticker: ${coin.ticker}) for someone learning about utility coins. Search the web if useful to ground this in accurate, current information.
-
-Respond with ONLY a raw JSON object, no markdown fences, no preamble, in exactly this shape:
-{
-  "utility": "2-4 sentences, plain-language explanation of what real-world problem or use case this coin's underlying network solves, and who uses it",
-  "marketIntegration": "2-4 sentences on how this coin/network is positioning itself to integrate into or reshape existing financial market structure — e.g. partnerships with institutions, regulatory strategy, payment rails, settlement systems",
-  "rwaCorrelation": "2-4 sentences objectively explaining tokenized real-world assets (RWAs) in general, and specifically how this coin's network relates to or enables RWA tokenization, if it does"
-}
-Write in your own words, plain and objective, no hype language, no quoted text from sources.`;
-  const parsed = await callClaude(prompt);
-  return {
-    utility: parsed.utility || "",
-    marketIntegration: parsed.marketIntegration || "",
-    rwaCorrelation: parsed.rwaCorrelation || "",
-    generatedAt: Date.now(),
-    status: "ready",
-  };
+  const cached = await getCached(coin.ticker);
+  if (cached?.profile) return cached.profile;
+  return await refreshOne(coin, "profile");
 }
 
 // ---------- Editable explainer card ----------
